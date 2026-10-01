@@ -235,6 +235,23 @@ def build_sinogram_projector(
     )
 
 
+def show_lordesc_view(ax, view, plane, lor_desc):
+    scanner = bundle.scanner
+    lor_desc = bundle.lor_descriptor
+    xp, dev = scanner.xp, scanner.dev
+    ax.view_init(elev=-30, azim=160, roll=180, vertical_axis="y")
+    scanner.show_lor_endpoints(ax)
+    lor_desc.show_views(
+        ax,
+        views=xp.asarray([view], device=dev),
+        planes=xp.asarray([plane], device=dev),
+        lw=0.5,
+        color="k",
+    )
+    ax.set_title(f"view {view}, plane {plane}")
+    return ax
+
+
 # ---------------------------------------------------------------------------
 # Crystal pair → sinogram bin
 #
