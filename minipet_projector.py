@@ -236,8 +236,7 @@ def build_sinogram_projector(
 
 
 def show_lordesc_view(ax, view, plane, lor_desc):
-    scanner = bundle.scanner
-    lor_desc = bundle.lor_descriptor
+    scanner = lor_desc.scanner
     xp, dev = scanner.xp, scanner.dev
     ax.view_init(elev=-30, azim=160, roll=180, vertical_axis="y")
     scanner.show_lor_endpoints(ax)
