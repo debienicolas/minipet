@@ -250,6 +250,27 @@ def show_lordesc_view(ax, view, plane, lor_desc):
     ax.set_title(f"view {view}, plane {plane}")
     return ax
 
+def endpoint_singles(rate_per_crystal) -> tuple[np.ndarray, np.ndarray]:
+    """Singles rates of the two crystals of every RVP bin.
+
+    ``rate_per_crystal`` is ``(12, 1225)`` from
+    :func:`petlab.singles_rate_per_crystal`. Returns ``(Si, Sj)``, each
+    ``(139, 210, 1225)`` like a sinogram. Unmeasured module pairs are 0.
+    """
+    ld = build_sinogram_lor_descriptor()
+    S = np.asarray(rate_per_crystal, dtype=np.float32).reshape(
+        N_MODULES, CRYSTALS_PER_SIDE, CRYSTALS_PER_SIDE)
+    S_det = S.transpose(0, 2, 1).reshape(N_DET_PER_RING, CRYSTALS_PER_SIDE)
+
+    d1 = np.asarray(ld.start_in_ring_index).T
+    d2 = np.asarray(ld.end_in_ring_index).T
+    r1 = np.asarray(ld.start_plane_index)
+    r2 = np.asarray(ld.end_plane_index)
+
+    Si = S_det[d1[:, :, None], r1[None, None, :]]
+    Sj = S_det[d2[:, :, None], r2[None, None, :]]
+    ok = measured_bins()
+    return np.where(ok, Si, 0.0), np.where(ok, Sj, 0.0)
 
 # ---------------------------------------------------------------------------
 # Crystal pair → sinogram bin
