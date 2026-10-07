@@ -40,8 +40,9 @@ Conventions verified against the DAQ
 * Raw ``(x, y)`` are Anger positions, **not** crystal indices. ``x`` is the
   axial coordinate and ``y`` the tangential one; see
   :func:`petlab.build_crystal_lut`. In ``.slm.lr5`` they are 8 bit; in
-  ``.clm.lr5`` they sit in the *low byte* of a 16-bit field whose high byte is
-  uninitialised, so they must be masked with ``& 0xFF``.
+  ``.clm.lr5`` they sit in the *low byte* of a 16-bit field. Prompt packets
+  pack a 32-bit per-event clock in the *high* bytes of ``x1,y1,x2,y2``
+  (same tick as singles ``ts``); delayed packets leave those high bytes at 0.
 """
 
 from __future__ import annotations
@@ -143,10 +144,21 @@ RAW_SINGLES_DTYPE = np.dtype([
 
 # Decoded coincidences: what :meth:`CLMFile.coincidences` returns.
 RAW_COINC_DTYPE = np.dtype([
+    ('t', '<i8'),          # full time for prompts; 0 for delayed
     ('module1', 'u1'), ('x1', 'u1'), ('y1', 'u1'), ('energy1', 'u1'),
     ('module2', 'u1'), ('x2', 'u1'), ('y2', 'u1'), ('energy2', 'u1'),
     ('delayed', '?'),
 ])
+
+
+def _coinc_tclk(ev: np.ndarray) -> np.ndarray:
+    """Unpack the 32-bit per-event clock stuffed in the high bytes of x/y."""
+    return (
+        ((ev['x1'] >> 8) & 0xFF).astype(np.uint32)
+        | (((ev['y1'] >> 8) & 0xFF).astype(np.uint32) << 8)
+        | (((ev['x2'] >> 8) & 0xFF).astype(np.uint32) << 16)
+        | (((ev['y2'] >> 8) & 0xFF).astype(np.uint32) << 24)
+    )
 
 
 def _kind_of(name: str) -> str | None:
@@ -261,9 +273,12 @@ class _ListModeFile(LR5File):
 class CLMFile(_ListModeFile):
     """Coincidence list-mode (.clm.lr5).
 
-    Prompt and delayed packets alternate, prompts first. The events carry no
-    time stamp, so this file cannot be used for the timing tasks; use the
-    ``.slm.lr5`` singles instead.
+    Prompt and delayed packets alternate, prompts first. Anger positions live
+    in the low byte of ``x1,y1,x2,y2``. Prompt packets pack a 32-bit per-event
+    clock ``tClk`` in the high bytes (same tick as singles ``ts``); delayed
+    packets leave those high bytes at 0. Each prompt packet is one 32-bit
+    epoch, so the full time stamp is
+    ``t = (prompt_packet_index << 32) | tClk``.
     """
 
     event_dtype = COINC_DTYPE
@@ -277,8 +292,17 @@ class CLMFile(_ListModeFile):
         self.n_prompt_packets = (n + 1) // 2
         self.n_delayed_packets = n // 2
 
+    def _prompt_times_for_packet(self, i, ev) -> np.ndarray:
+        """Full time stamps for events in prompt packet ``i`` (even index)."""
+        epoch = np.int64(i // 2)
+        return (epoch << 32) | _coinc_tclk(ev).astype(np.int64)
+
     def coincidences(self, delayed: bool | None = None) -> np.ndarray:
-        """Decoded coincidences with the positions masked to 8 bits.
+        """Decoded coincidences with Anger positions and prompt times.
+
+        Anger ``(x, y)`` are the low bytes of the 16-bit fields. For prompts,
+        ``t`` is ``(prompt_packet_index << 32) | tClk`` from the high bytes;
+        for delayed events ``t`` is 0.
 
         ``delayed=None`` returns both windows (see the ``delayed`` field),
         ``False`` only the prompts and ``True`` only the delayed window.
@@ -294,15 +318,40 @@ class CLMFile(_ListModeFile):
             c = np.empty(len(ev), dtype=RAW_COINC_DTYPE)
             for end, src in ((1, '1'), (2, '2')):
                 c[f'module{end}'] = ev[f'd{src}']
-                # the high byte of the position fields is uninitialised
                 c[f'x{end}'] = ev[f'x{src}'] & 0xFF
                 c[f'y{end}'] = ev[f'y{src}'] & 0xFF
                 c[f'energy{end}'] = ev[f'e{src}'] & 0xFF
             c['delayed'] = is_delayed
+            c['t'] = 0 if is_delayed else self._prompt_times_for_packet(i, ev)
             parts.append(c)
         if not parts:
             return np.empty(0, dtype=RAW_COINC_DTYPE)
         return np.concatenate(parts)
+
+    def prompt_times(self) -> np.ndarray:
+        """Full time stamps of every prompt coincidence, in ticks of :data:`T_CLK_NS`.
+
+        Unpacks ``tClk`` from the high bytes of ``x1,y1,x2,y2`` and combines it
+        with the prompt-packet / epoch index:
+        ``t = (prompt_packet_index << 32) | tClk``.
+        """
+        parts = []
+        for i in range(0, self.n_packets, 2):
+            ev = self._packet_events(i)
+            if not len(ev):
+                continue
+            parts.append(self._prompt_times_for_packet(i, ev))
+        if not parts:
+            return np.empty(0, dtype=np.int64)
+        return np.concatenate(parts)
+
+    @property
+    def duration_s(self) -> float:
+        """Acquisition length from the prompt time-stamp span."""
+        t = self.prompt_times()
+        if not len(t):
+            return 0.0
+        return float(t.max() - t.min()) * T_CLK_NS * 1e-9
 
     def pair_index(self, coinc: np.ndarray) -> np.ndarray:
         """Index into :data:`COINC_PAIRS` for each coincidence (-1 if not allowed)."""
@@ -697,11 +746,11 @@ class MiniPET:
         return pair_rates_cps(self.rate, row=row)
 
     def duration_s(self) -> float | None:
-        """Acquisition length in seconds from the singles time-stamp span."""
+        """Acquisition length in seconds from the list-mode time-stamp span."""
         if self.slm is not None:
             return self.slm.duration_s
         if self.clm is not None:
-            return float(self.clm.scan.get('lengthSec') or 0) or None
+            return self.clm.duration_s or None
         return None
 
     def __repr__(self):
